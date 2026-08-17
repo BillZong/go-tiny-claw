@@ -1,0 +1,72 @@
+# If you prefer the allow list template instead of the deny list, see community template:
+# https://github.com/github/gitignore/blob/main/community/Golang/Go.AllowList.gitignore
+#
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+bin/
+
+# Test binary, built with `go test -c`
+*.test
+
+# Code coverage profiles and other test artifacts
+*.out
+coverage.*
+*.coverprofile
+profile.cov
+*.prof
+*.pprof
+
+# Debug files
+*.log
+__debug_bin*
+
+# Mac OS
+.DS_Store
+
+# Dependency directories (remove the comment below to include it)
+# vendor/
+
+# Go workspace file
+go.work
+go.work.sum
+
+# env file
+.env
+
+# Local Go module/build cache (for sandboxed environments)
+.gocache/
+
+# Editor/IDE
+.idea/
+.vscode/
+
+# Code Agents
+.claude/
+.codewhale/
+.codex/
+.cursor/
+.cursorignore # cursor ignore file
+.gemini/
+.minimax/
+.opencode/
+.trae/
+.windsurf/
+
+# agent local files for development
+AGENTS.local.md # codex only? 
+
+# Agent plugins
+.cline/
+.omc/
+.omx/
+.roo/
+
+# Multiple file agents or history of agents
+.aider*
+.ai*
+.agent-deck/
+.copilot-cli/
