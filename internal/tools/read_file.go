@@ -7,25 +7,29 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/BillZong/go-tiny-claw/internal/schema"
 )
 
-type ReadFileTool struct {
+type readFileTool struct {
 	workDir string
 }
 
-func NewReadFileTool(workDir string) BaseTool {
-	return &ReadFileTool{
-		workDir: workDir,
+func NewReadFileTool(workDir string) (BaseTool, error) {
+	if workDir == "" {
+		return nil, fmt.Errorf("必须提供工作路径")
 	}
+	return &readFileTool{
+		workDir: workDir,
+	}, nil
 }
 
-func (t *ReadFileTool) Name() string {
+func (t *readFileTool) Name() string {
 	return "read_file"
 }
 
-func (t *ReadFileTool) Definition() schema.ToolDefinition {
+func (t *readFileTool) Definition() schema.ToolDefinition {
 	return schema.ToolDefinition{
 		Name:        t.Name(),
 		Description: "读取指定路径的文件内容",
@@ -46,15 +50,19 @@ type readFileArgs struct {
 	Path string `json:"path"`
 }
 
-func (t *ReadFileTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (t *readFileTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
 	// 1. 延迟解析：将大模型传过来的 JSON 参数解析为强类型结构体
 	var input readFileArgs
 	if err := json.Unmarshal(args, &input); err != nil {
 		return "", fmt.Errorf("参数解析错误: %w", err)
 	}
 
+	// 防止路径穿越
+	if strings.Contains(input.Path, "..") {
+		return "", fmt.Errorf("不允许访问非工作路径内容")
+	}
+
 	// 2. 拼接绝对路径
-	// TODO: 防路径穿越检测
 	absolutePath := filepath.Join(t.workDir, input.Path)
 
 	// 3. 执行物理 IO 操作
