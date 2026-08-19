@@ -11,7 +11,14 @@ const (
 	RoleAssistant Role = "assistant" // 模型的输出：包含推理(Reasoning)或工具调用(ToolCall)
 )
 
-// Message 代表上下文中传递的单条消息
+// Message 代表上下文中传递的单条消息。
+//
+// 通用的极简化的消息类型。
+//   - 通过 Role 来区分消息源；
+//   - 通过 ToolCallID 判断是否为工具调用结果；
+//   - 通过 ToolCalls 判断大模型是否要求调用工具。
+//
+// 这种范式在工程上不太好，作为 DTO，承担了状态机的管理。
 type Message struct {
 	Role    Role   `json:"role"`
 	Content string `json:"content"` // 存放纯文本内容

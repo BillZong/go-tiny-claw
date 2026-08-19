@@ -1,88 +1,72 @@
+// cmd/claw/main.go
 package main
 
 import (
 	"context"
 	"log"
 	"os"
-	"time"
 
 	"github.com/BillZong/go-tiny-claw/internal/engine"
+	"github.com/BillZong/go-tiny-claw/internal/provider"
 	"github.com/BillZong/go-tiny-claw/internal/schema"
 )
 
-// ==========================================
-// 1. 伪造的大模型 Provider
-// ==========================================
-type mockProvider struct {
-	turn int
-}
-
-// 模拟大模型的响应：第一轮请求执行 bash，第二轮输出最终结果
-func (m *mockProvider) Generate(ctx context.Context, msgs []schema.Message, tools []schema.ToolDefinition) (*schema.Message, error) {
-	if len(tools) == 0 {
-		time.Sleep(time.Second)
-		return &schema.Message{
-			Role:    schema.RoleAssistant,
-			Content: "【推理中】目标是检查文件，我不能直接盲猜，我需要先调用 bash 工具执行 ls 命令，看看当前目录下有什么，然后再做定夺。",
-		}, nil
-	}
-
-	m.turn++
-	if m.turn == 1 {
-		time.Sleep(time.Second)
-		return &schema.Message{
-			Role:    schema.RoleAssistant,
-			Content: "我要执行我刚才计划的步骤了。",
-			ToolCalls: []schema.ToolCall{
-				{ID: "call_123", Name: "bash", Arguments: []byte(`{"command": "ls -la"}`)},
-			},
-		}, nil
-	}
-
-	time.Sleep(2 * time.Second)
-
-	return &schema.Message{
-		Role:    schema.RoleAssistant,
-		Content: "根据工具返回的结果，我看到了 main.go，任务圆满完成！",
-	}, nil
-}
-
-// ==========================================
-// 2. 伪造的 Tool Registry
-// ==========================================
+// 伪造的工具注册表 (用于测试 Provider 的工具提取能力)
 type mockRegistry struct{}
 
 func (m *mockRegistry) GetAvailableTools() []schema.ToolDefinition {
 	return []schema.ToolDefinition{
-		{Name: "bash"},
+		{
+			Name:        "get_weather",
+			Description: "获取指定城市的当前天气情况。",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"city": map[string]interface{}{
+						"type": "string",
+					},
+				},
+				"required": []string{"city"},
+			},
+		},
 	}
 }
 
 func (m *mockRegistry) Execute(ctx context.Context, call schema.ToolCall) schema.ToolResult {
-	// 直接返回一段伪造的终端输出
+	log.Printf("  -> [Mock 工具执行] 获取 %s 的天气中...\n", call.Name)
 	return schema.ToolResult{
 		ToolCallID: call.ID,
-		Output:     "-rw-r--r--  1 user group  234 Oct 24 10:00 main.go\n",
+		Output:     "API 返回：今天是晴天，气温 25 度。",
 		IsError:    false,
 	}
 }
 
-// ==========================================
-// 3. 组装运行
-// ==========================================
 func main() {
-	// 获取当前执行目录作为 WorkDir 物理边界
+	// 确保已设置 MINIMAX_API_KEY
+	if os.Getenv("MINIMAX_API_KEY") == "" {
+		log.Fatal("请先导出 MINIMAX_API_KEY 环境变量")
+	}
+
 	workDir, _ := os.Getwd()
 
-	p := &mockProvider{}
-	r := &mockRegistry{}
-
-	// 实例化核心引擎
-	eng := engine.NewAgentEngine(p, r, workDir, true)
-
-	// 发起任务指令
-	err := eng.Run(context.Background(), "帮我检查当前目录的文件")
+	// 1. 初始化真实的 Provider大脑
+	// 这里你可以任意切换 openai 或 claude，效果完全一致！
+	llmProvider, err := provider.NewMiniMaxOpenAIProvider("MiniMax-M2.7")
 	if err != nil {
-		log.Fatalf("引擎崩溃: %v", err)
+		log.Fatalf("报错了: %v", err)
+	}
+
+	// 2. 注入伪造的工具注册表
+	registry := &mockRegistry{}
+
+	// 3. 实例化并运行引擎，开启 EnableThinking = true (开启慢思考阶段！)
+	eng := engine.NewAgentEngine(llmProvider, registry, workDir, true)
+
+	// 设定测试任务
+	prompt := "我想在深圳跑步，帮我查查天气适合吗？"
+
+	err = eng.Run(context.Background(), prompt)
+	if err != nil {
+		log.Fatalf("引擎运行崩溃: %v", err)
 	}
 }
