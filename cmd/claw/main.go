@@ -38,11 +38,29 @@ func main() {
 	// 设定测试任务
 	// 发起一个需要连贯物理动作的任务
 	prompt := `
-	请帮我执行以下操作：
-1. 用 bash 查看一下我当前电脑的 Go 版本。
-2. 帮我写一个简单的 helloworld.go 文件，输出 "Hello, go-tiny-claw!"。
-3. 用 bash 编译并运行这个 go 文件，确认它能正常工作。
-4. 清理刚才创建的 helloworld.go 文件，确认能正常清理。
+	在工作目录下编辑一个 server.go文件，内容如下：
+package main
+
+import "fmt"
+
+func main() {
+	// 启动服务器
+	fmt.Println("Server is starting on port 8080...")
+
+	// TODO: 增加鉴权逻辑
+	if true {
+		fmt.Println("No auth, everyone can access.")
+	}
+}
+
+1. 保存好文件内容后，通知我验证，然后等待10秒钟。
+2. 请帮我把里面 "TODO: 增加鉴权逻辑" 下面的那个 if 语句，整个替换为：
+	if user == nil {
+		fmt.Println("Forbidden!")
+		return
+	}
+3. 编辑完成后，通知我验证，然后再等待10秒钟。
+4. 删除 server.go 文件，并通知验证结果。
 `
 	err = eng.Run(context.Background(), prompt)
 	if err != nil {
@@ -72,6 +90,14 @@ func registerTools(registry tools.Registry, workDir string) error {
 		return err
 	}
 	if err := registry.Register(bt); err != nil {
+		return err
+	}
+
+	et, err := tools.NewEditFileToll(workDir)
+	if err != nil {
+		return err
+	}
+	if err := registry.Register(et); err != nil {
 		return err
 	}
 
