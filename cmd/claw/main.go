@@ -32,35 +32,14 @@ func main() {
 		log.Fatalf("注册工具失败: %v", err)
 	}
 
-	// 3. 实例化并运行引擎，开启 EnableThinking = true (开启慢思考阶段！)
-	eng := engine.NewAgentEngine(llmProvider, registry, workDir, false)
+	// 3. 实例化并运行引擎，开启 EnableThinking = true (开启慢思考阶段，促使模型一次性统筹规划)
+	eng := engine.NewAgentEngine(llmProvider, registry, workDir, true)
 
 	// 设定测试任务
 	// 发起一个需要连贯物理动作的任务
 	prompt := `
-	在工作目录下编辑一个 server.go文件，内容如下：
-package main
-
-import "fmt"
-
-func main() {
-	// 启动服务器
-	fmt.Println("Server is starting on port 8080...")
-
-	// TODO: 增加鉴权逻辑
-	if true {
-		fmt.Println("No auth, everyone can access.")
-	}
-}
-
-1. 保存好文件内容后，通知我验证，然后等待10秒钟。
-2. 请帮我把里面 "TODO: 增加鉴权逻辑" 下面的那个 if 语句，整个替换为：
-	if user == nil {
-		fmt.Println("Forbidden!")
-		return
-	}
-3. 编辑完成后，通知我验证，然后再等待10秒钟。
-4. 删除 server.go 文件，并通知验证结果。
+我当前目录下有 a.txt, b.txt, c.txt 三个文件。
+为了节省时间，请你同时一次性读取这三个文件，并将它们的内容综合起来，告诉我它们分别记录了什么领域的信息。
 `
 	err = eng.Run(context.Background(), prompt)
 	if err != nil {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sync"
 
 	"github.com/BillZong/go-tiny-claw/internal/provider"
 	"github.com/BillZong/go-tiny-claw/internal/schema"
@@ -74,83 +75,65 @@ func (e *AgentEngine) Run(ctx context.Context, userPrompt string) error {
 
 		// 向大模型发起推理请求 (包含 Reasoning)
 		log.Println("[Engine][Phase 2] 恢复工具挂载，等待模型采取行动")
-		responseMsg, err := e.provider.Generate(ctx, contextHistory, availableTools)
+		actionResp, err := e.provider.Generate(ctx, contextHistory, availableTools)
 		if err != nil {
 			return fmt.Errorf("模型生成失败: %w", err)
 		}
 
 		// 将模型的响应完整追加到上下文历史中
-		contextHistory = append(contextHistory, *responseMsg)
+		contextHistory = append(contextHistory, *actionResp)
 
 		// 如果模型回复了纯文本，打印出来 (这通常是它的思考过程，或是最终结果)
-		if responseMsg.Content != "" {
-			fmt.Printf("🤖 [对外回复]: %s\n", responseMsg.Content)
+		if actionResp.Content != "" {
+			fmt.Printf("🤖 [对外回复]: %s\n", actionResp.Content)
 		}
 
 		// 3. 退出条件判断
 		// 如果模型没有请求任何工具调用，说明它认为任务已经完成，跳出循环。
-		if len(responseMsg.ToolCalls) == 0 {
-			log.Println("[Engine] 任务完成，退出循环。")
+		if len(actionResp.ToolCalls) == 0 {
+			log.Println("[Engine] 模型未请求调用工具，任务宣告完成。")
 			break
 		}
 
 		// 4. 执行行动 (Action) 与 获取观察结果 (Observation)
-		log.Printf("[Engine] 模型请求调用 %d 个工具...\n", len(responseMsg.ToolCalls))
+		log.Printf("[Engine] 模型请求调用 %d 个工具...\n", len(actionResp.ToolCalls))
 
-		// === 顺序执行工具调用（可选：可以改为并行执行）===
-		for _, toolCall := range responseMsg.ToolCalls {
-			log.Printf("  -> 🛠️ 执行工具: %s, 参数: %s\n", toolCall.Name, string(toolCall.Arguments))
+		// 1. 预分配一个固定长度的切片，用于安全地存放各个并发工具的执行结果（Observation） // 长度与 ToolCalls 的数量完全一致 observationMsgs := make([]schema.Message, len(actionResp.ToolCalls))
+		observationMsgs := make([]schema.Message, len(actionResp.ToolCalls))
+		var wg sync.WaitGroup
+		wg.Add(len(actionResp.ToolCalls))
 
-			// 通过 Registry 路由并执行底层工具
-			result := e.registry.Execute(ctx, toolCall)
+		for i, toolCall := range actionResp.ToolCalls {
+			// 开启协程。注意：一定要将索引 i 和 toolCall 作为参数传入匿名函数，防止闭包变量捕获陷阱！
+			go func(i int, tc schema.ToolCall) {
+				defer wg.Done()
 
-			if result.IsError {
-				log.Printf("  -> ❌ 工具执行报错: %s\n", result.Output)
-			} else {
-				log.Printf("  -> ✅ 工具执行成功 (返回 %d 字节)\n", len(result.Output))
-			}
+				log.Printf("  -> 🛠️ 执行工具[%d]: %s\n", i, tc.Name)
 
-			// 将工具执行的观察结果 (Observation) 封装为 User Message 追加到上下文中
-			// 注意：ToolCallID 必须携带！这是维系大模型推理链条的关键
-			observationMsg := schema.Message{
-				Role:       schema.RoleUser,
-				Content:    result.Output,
-				ToolCallID: toolCall.ID,
-			}
-			contextHistory = append(contextHistory, observationMsg)
+				result := e.registry.Execute(ctx, tc)
+				if result.IsError {
+					log.Printf("  -> ❌ 工具[%d] 执行报错: %s\n", i, result.Output)
+				} else {
+					log.Printf("  -> ✅ 工具[%d] 执行成功 (返回 %d 字节)\n", i, len(result.Output))
+				}
+
+				obsMsg := schema.Message{
+					Role:       schema.RoleUser,
+					Content:    result.Output,
+					ToolCallID: tc.ID,
+				}
+				// 【线程安全】: 由于每个 Goroutine 操作的是预分配切片的不同索引，这里不需要加锁 (Mutex)，性能极高！
+				observationMsgs[i] = obsMsg
+			}(i, toolCall)
 		}
 
-		// // === 并行执行模式 ===
-		// var wg sync.WaitGroup
-		// wg.Add(len(responseMsg.ToolCalls))
-		// var lock sync.Mutex
-		// for _, toolCall := range responseMsg.ToolCalls {
-		// 	go func(tc schema.ToolCall) {
-		// 		defer wg.Done()
+		wg.Wait()
+		log.Println("[Engine] 所有并发工具执行完毕，开始聚合观察结果 (Observation)...")
 
-		// 		log.Printf("  -> 🛠️ 执行工具: %s, 参数: %s\n", tc.Name, string(tc.Arguments))
-
-		// 		// 并行执行工具调用，并将结果存入 results map
-		// 		result := e.registry.Execute(ctx, tc)
-		// 		if result.IsError {
-		// 			log.Printf("  -> ❌ 工具执行报错: %s\n", result.Output)
-		// 		} else {
-		// 			log.Printf("  -> ✅ 工具执行成功 (返回 %d 字节)\n", len(result.Output))
-		// 		}
-
-		// 		observationMsg := schema.Message{
-		// 			Role:       schema.RoleUser,
-		// 			Content:    result.Output,
-		// 			ToolCallID: tc.ID,
-		// 		}
-
-		// 		// 将 Observation 追加到上下文历史中
-		// 		lock.Lock()
-		// 		contextHistory = append(contextHistory, observationMsg)
-		// 		lock.Unlock()
-		// 	}(toolCall)
-		// }
-		// wg.Wait()
+		// 聚合观察结果
+		for _, obs := range observationMsgs {
+			contextHistory = append(contextHistory, obs)
+		}
 
 		// 循环回到开头，模型将带着新加入的 Observation 继续它的下一轮思考...
 	}
