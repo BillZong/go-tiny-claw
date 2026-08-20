@@ -2,13 +2,15 @@
 package main
 
 import (
-	"context"
 	"log"
+	"net/http"
 	"os"
 
 	"github.com/BillZong/go-tiny-claw/internal/engine"
+	"github.com/BillZong/go-tiny-claw/internal/feishu"
 	"github.com/BillZong/go-tiny-claw/internal/provider"
 	"github.com/BillZong/go-tiny-claw/internal/tools"
+	"github.com/larksuite/oapi-sdk-go/v3/core/httpserverext"
 )
 
 func main() {
@@ -35,15 +37,24 @@ func main() {
 	// 3. 实例化并运行引擎，开启 EnableThinking = true (开启慢思考阶段，促使模型一次性统筹规划)
 	eng := engine.NewAgentEngine(llmProvider, registry, workDir, true)
 
-	// 设定测试任务
-	// 发起一个需要连贯物理动作的任务
-	prompt := `
-我当前目录下有 a.txt, b.txt, c.txt 三个文件。
-为了节省时间，请你同时一次性读取这三个文件，并将它们的内容综合起来，告诉我它们分别记录了什么领域的信息。
-`
-	err = eng.Run(context.Background(), prompt)
+	// 2. 初始化飞书 Bot 调度器
+	bot, err := feishu.NewFeishuBot(eng)
 	if err != nil {
-		log.Fatalf("引擎运行崩溃: %v", err)
+		log.Fatalf("飞书 Bot 初始化失败: %v", err)
+	}
+	dispatcher, err := bot.GetEventDispatcher()
+	if err != nil {
+		log.Fatalf("飞书 Bot 事件调度器初始化失败: %v", err)
+	}
+
+	http.HandleFunc("/webhook/event", httpserverext.NewEventHandlerFunc(dispatcher))
+
+	port := "0.0.0.0:48080"
+	log.Printf("启动飞书 Bot 服务，监听端口：%s\n", port)
+
+	err = http.ListenAndServe(port, nil)
+	if err != nil {
+		log.Fatalf("飞书 Bot 服务启动失败: %v", err)
 	}
 }
 
