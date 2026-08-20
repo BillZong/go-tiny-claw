@@ -153,6 +153,10 @@ func (t *editFileTool) Execute(ctx context.Context, args json.RawMessage) (strin
 		return "", fmt.Errorf("参数解析失败: %w", err)
 	}
 
+	if strings.Contains(input.Path, "..") {
+		return "", fmt.Errorf("不允许访问非工作路径内容")
+	}
+
 	fullPath := filepath.Join(t.workDir, input.Path)
 
 	// 读取原文件内容
