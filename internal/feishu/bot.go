@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/BillZong/go-tiny-claw/internal/engine"
+	"github.com/BillZong/go-tiny-claw/internal/schema"
 	lark "github.com/larksuite/oapi-sdk-go/v3"
 	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
@@ -84,7 +85,10 @@ func (b *FeishuBot) GetEventDispatcher() (*dispatcher.EventDispatcher, error) {
 func (b *FeishuBot) handleAgentRun(chatId, prompt string) {
 	ctx := context.Background()
 	reporter := NewFeishuReporter(b.client, chatId)
-	if err := b.engine.Run(ctx, prompt, reporter); err != nil {
+	workDir, _ := os.Getwd()
+	session := engine.GlobalSessionMgr.GetOrCreate(chatId, workDir)
+	session.Append(schema.Message{Role: schema.RoleUser, Content: prompt})
+	if err := b.engine.Run(ctx, session, reporter); err != nil {
 		reporter.OnMessage(ctx, fmt.Sprintf("❌ 执行出错：%v", err))
 	}
 }
