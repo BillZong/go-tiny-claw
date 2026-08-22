@@ -21,7 +21,7 @@ func main() {
 
 	// 1. 初始化真实的 Provider大脑
 	// 这里你可以任意切换 openai 或 claude，效果完全一致！
-	llmProvider, err := provider.NewMiniMaxOpenAIProvider("MiniMax-M3")
+	llmProvider, err := provider.NewMiniMaxOpenAIProvider("MiniMax-M2.7")
 	if err != nil {
 		log.Fatalf("报错了: %v", err)
 	}
