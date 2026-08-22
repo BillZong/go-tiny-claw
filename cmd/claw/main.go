@@ -2,15 +2,13 @@
 package main
 
 import (
+	"context"
 	"log"
-	"net/http"
 	"os"
 
 	"github.com/BillZong/go-tiny-claw/internal/engine"
-	"github.com/BillZong/go-tiny-claw/internal/feishu"
 	"github.com/BillZong/go-tiny-claw/internal/provider"
 	"github.com/BillZong/go-tiny-claw/internal/tools"
-	"github.com/larksuite/oapi-sdk-go/v3/core/httpserverext"
 )
 
 func main() {
@@ -23,7 +21,7 @@ func main() {
 
 	// 1. 初始化真实的 Provider大脑
 	// 这里你可以任意切换 openai 或 claude，效果完全一致！
-	llmProvider, err := provider.NewMiniMaxOpenAIProvider("MiniMax-M2.7")
+	llmProvider, err := provider.NewMiniMaxOpenAIProvider("MiniMax-M3")
 	if err != nil {
 		log.Fatalf("报错了: %v", err)
 	}
@@ -37,24 +35,17 @@ func main() {
 	// 3. 实例化并运行引擎，开启 EnableThinking = true (开启慢思考阶段，促使模型一次性统筹规划)
 	eng := engine.NewAgentEngine(llmProvider, registry, workDir, true)
 
-	// 2. 初始化飞书 Bot 调度器
-	bot, err := feishu.NewFeishuBot(eng)
-	if err != nil {
-		log.Fatalf("飞书 Bot 初始化失败: %v", err)
-	}
-	dispatcher, err := bot.GetEventDispatcher()
-	if err != nil {
-		log.Fatalf("飞书 Bot 事件调度器初始化失败: %v", err)
-	}
+	// 注入新实现的终端输出器
+	reporter := engine.NewTerminalReporter()
 
-	http.HandleFunc("/webhook/event", httpserverext.NewEventHandlerFunc(dispatcher))
+	prompt := `
+我需要在当前目录下新建一个 ping.go，提供一个简单的 http ping 接口。
+写完之后，帮我把代码用 git 提交一下。
+`
 
-	port := "0.0.0.0:48080"
-	log.Printf("启动飞书 Bot 服务，监听端口：%s\n", port)
-
-	err = http.ListenAndServe(port, nil)
+	err = eng.Run(context.Background(), prompt, reporter)
 	if err != nil {
-		log.Fatalf("飞书 Bot 服务启动失败: %v", err)
+		log.Fatalf("引擎运行崩溃: %v", err)
 	}
 }
 

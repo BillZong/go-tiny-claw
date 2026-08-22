@@ -6,6 +6,7 @@ import (
 	"log"
 	"sync"
 
+	ctxpkg "github.com/BillZong/go-tiny-claw/internal/context"
 	"github.com/BillZong/go-tiny-claw/internal/provider"
 	"github.com/BillZong/go-tiny-claw/internal/schema"
 	"github.com/BillZong/go-tiny-claw/internal/tools"
@@ -15,31 +16,33 @@ import (
 type AgentEngine struct {
 	provider       provider.LLMProvider
 	registry       tools.Registry
-	WorkDir        string // WorkDir (工作区): 借鉴 OpenClaw 的理念，Agent 必须有一个明确的物理边界
-	EnableThinking bool   // EnableThinking (是否启用思考): 允许模型在执行工具前进行推理
+	workDir        string                 // WorkDir (工作区): 借鉴 OpenClaw 的理念，Agent 必须有一个明确的物理边界
+	enableThinking bool                   // EnableThinking (是否启用思考): 允许模型在执行工具前进行推理
+	composer       *ctxpkg.PromptComposer // 【新增】引擎持有 Composer 实例
 }
 
 func NewAgentEngine(p provider.LLMProvider, r tools.Registry, workDir string, enableThinking bool) *AgentEngine {
 	return &AgentEngine{
 		provider:       p,
 		registry:       r,
-		WorkDir:        workDir,
-		EnableThinking: enableThinking,
+		workDir:        workDir,
+		enableThinking: enableThinking,
+		composer:       ctxpkg.NewPromptComposer(workDir), // 初始化组装器
 	}
 }
 
 // Run 启动 Agent 的生命周期
 func (e *AgentEngine) Run(ctx context.Context, userPrompt string, reporter Reporter) error {
-	log.Printf("[Engine] 引擎启动，锁定工作区: %s\n", e.WorkDir)
-	log.Printf("[Engine] 慢思考模式: %v\n", e.EnableThinking)
+	log.Printf("[Engine] 引擎启动，锁定工作区: %s\n", e.workDir)
+	log.Printf("[Engine] 慢思考模式: %v\n", e.enableThinking)
+
+	// 动态组装 system prompt
+	systemMsg := e.composer.Build()
 
 	// 1. 初始化会话的 Context (上下文内存)
 	// 在真实的场景中，这里会由动态 Prompt 组装器加载 AGENTS.md。目前我们先硬编码。
 	contextHistory := []schema.Message{
-		{
-			Role:    schema.RoleSystem,
-			Content: "You are go-tiny-claw, an expert coding assistant. You have full access to tools in the workspace.",
-		},
+		systemMsg,
 		{
 			Role:    schema.RoleUser,
 			Content: userPrompt,
@@ -59,7 +62,7 @@ func (e *AgentEngine) Run(ctx context.Context, userPrompt string, reporter Repor
 		// ===================================================================
 		// Phase 1: 慢思考阶段 - 剥夺工具，强制规划
 		// ===================================================================
-		if e.EnableThinking {
+		if e.enableThinking {
 			if reporter != nil {
 				reporter.OnThinking(ctx)
 			}
