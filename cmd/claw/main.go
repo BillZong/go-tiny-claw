@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"log"
 	"os"
 
@@ -13,16 +14,26 @@ import (
 )
 
 func main() {
+	// 通过命令行参数接收用户的 promptPtr
+	promptPtr := flag.String("prompt", "", "要交给 Agent 执行的任务描述")
+	flag.Parse()
+
+	if *promptPtr == "" {
+		log.Println("请提供一个 prompt 参数，或者使用 -prompt 参数指定一个 prompt")
+		os.Exit(1)
+	}
+
 	// 确保已设置 MINIMAX_API_KEY
 	if os.Getenv("MINIMAX_API_KEY") == "" {
 		log.Fatal("请先导出 MINIMAX_API_KEY 环境变量")
 	}
 
 	workDir, _ := os.Getwd()
+	workDir += "/workspace"
 
 	// 1. 初始化真实的 Provider大脑
 	// 这里你可以任意切换 openai 或 claude，效果完全一致！
-	llmProvider, err := provider.NewMiniMaxOpenAIProvider("MiniMax-M2.7")
+	llmProvider, err := provider.NewMiniMaxOpenAIProvider("MiniMax-M3")
 	if err != nil {
 		log.Fatalf("报错了: %v", err)
 	}
@@ -34,28 +45,20 @@ func main() {
 	}
 
 	// 3. 实例化并运行引擎，开启 EnableThinking = true (开启慢思考阶段，促使模型一次性统筹规划)
-	eng := engine.NewAgentEngine(llmProvider, registry, false)
+	eng := engine.NewAgentEngine(llmProvider, registry, false, true)
 	// 注入新实现的终端输出器
 	reporter := engine.NewTerminalReporter()
 
-	sessionID := "test_oom_protection_001"
+	sessionID := "task_web_server_01"
 	sess := engine.GlobalSessionMgr.GetOrCreate(sessionID, workDir)
 
-	// 发起一个会导致读取大文件的恶意任务
-	prompt := `
-请帮我执行以下三个步骤：
-1. 使用 bash 执行 echo "开始排查日志"
-2. 使用 read_file 工具读取当前目录下的巨大文件 mock_log.txt
-3. 使用 bash 执行 date 命令获取当前时间，并告诉我任务全部完成。
-`
-	sess.Append(schema.Message{
-		Role:    schema.RoleUser,
-		Content: prompt,
-	})
+	log.Printf("\n>>> 🚀 收到指令: %s\n", *promptPtr)
 
-	err = eng.Run(context.Background(), sess, reporter)
-	if err != nil {
-		log.Fatalf("引擎运行崩溃: %v", err)
+	// 将用户的 Prompt 压入 Session
+	sess.Append(schema.Message{Role: schema.RoleUser, Content: *promptPtr})
+
+	if err := eng.Run(context.Background(), sess, reporter); err != nil {
+		log.Fatalf("引擎运行崩溃: %v\n", err)
 	}
 }
 

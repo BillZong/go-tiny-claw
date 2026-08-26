@@ -17,19 +17,19 @@ type AgentEngine struct {
 	provider       provider.LLMProvider
 	registry       tools.Registry
 	enableThinking bool // EnableThinking (是否启用思考): 允许模型在执行工具前进行推理
-	composer       *ctxpkg.PromptComposer
+	planMode       bool // PlanMode (是否启用计划模式): 允许模型在执行工具前进行推理
 	compatcor      *ctxpkg.Compactor
 }
 
-func NewAgentEngine(p provider.LLMProvider, r tools.Registry, enableThinking bool) *AgentEngine {
+func NewAgentEngine(p provider.LLMProvider, r tools.Registry, enableThinking bool, planMode bool) *AgentEngine {
 	return &AgentEngine{
 		provider:       p,
 		registry:       r,
 		enableThinking: enableThinking,
-		composer:       ctxpkg.NewPromptComposer("."),
+		planMode:       planMode,
 		// 【初始化压缩器】：为了便于今天的极端测试，我们将水位线阈值设积极（例如 3000 字符），
 		// 并保护最近的 6 条消息（大约两轮 Turn 的交互）
-		compatcor: ctxpkg.NewCompactor(3000, 6),
+		compatcor: ctxpkg.NewCompactor(40000, 6),
 	}
 }
 
@@ -38,13 +38,12 @@ func (e *AgentEngine) Run(ctx context.Context, session *Session, reporter Report
 	log.Printf("[Engine] 唤醒会话 [%s]，锁定工作区: %s\n", session.ID, session.WorkDir)
 
 	// 动态组装 system prompt
-	e.composer = ctxpkg.NewPromptComposer(session.WorkDir)
-	systemMsg := e.composer.Build()
+	composer := ctxpkg.NewPromptComposer(session.WorkDir, e.planMode)
+	systemMsg := composer.Build()
 
 	for {
+		// 工具和上下文组装
 		availableTools := e.registry.GetAvailableTools()
-
-		// 上下文组装
 		workingMemory := session.GetWorkingMemory(20)
 
 		var contextHistory []schema.Message
