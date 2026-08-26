@@ -17,6 +17,8 @@ type AgentEngine struct {
 	provider       provider.LLMProvider
 	registry       tools.Registry
 	enableThinking bool // EnableThinking (是否启用思考): 允许模型在执行工具前进行推理
+	composer       *ctxpkg.PromptComposer
+	compatcor      *ctxpkg.Compactor
 }
 
 func NewAgentEngine(p provider.LLMProvider, r tools.Registry, enableThinking bool) *AgentEngine {
@@ -24,6 +26,10 @@ func NewAgentEngine(p provider.LLMProvider, r tools.Registry, enableThinking boo
 		provider:       p,
 		registry:       r,
 		enableThinking: enableThinking,
+		composer:       ctxpkg.NewPromptComposer("."),
+		// 【初始化压缩器】：为了便于今天的极端测试，我们将水位线阈值设积极（例如 3000 字符），
+		// 并保护最近的 6 条消息（大约两轮 Turn 的交互）
+		compatcor: ctxpkg.NewCompactor(3000, 6),
 	}
 }
 
@@ -32,18 +38,20 @@ func (e *AgentEngine) Run(ctx context.Context, session *Session, reporter Report
 	log.Printf("[Engine] 唤醒会话 [%s]，锁定工作区: %s\n", session.ID, session.WorkDir)
 
 	// 动态组装 system prompt
-	composer := ctxpkg.NewPromptComposer(session.WorkDir)
-	systemMsg := composer.Build()
+	e.composer = ctxpkg.NewPromptComposer(session.WorkDir)
+	systemMsg := e.composer.Build()
 
 	for {
 		availableTools := e.registry.GetAvailableTools()
 
 		// 上下文组装
-		workingMemory := session.GetWorkingMemory(6)
+		workingMemory := session.GetWorkingMemory(20)
 
 		var contextHistory []schema.Message
 		contextHistory = append(contextHistory, systemMsg)
 		contextHistory = append(contextHistory, workingMemory...)
+
+		compactedContext := e.compatcor.Compact(contextHistory)
 
 		// reasoning
 		if e.enableThinking {
@@ -51,24 +59,26 @@ func (e *AgentEngine) Run(ctx context.Context, session *Session, reporter Report
 				reporter.OnThinking(ctx)
 			}
 
-			thinkResponse, err := e.provider.Generate(ctx, contextHistory, nil)
+			thinkResponse, err := e.provider.Generate(ctx, compactedContext, nil)
 			if err != nil {
 				return fmt.Errorf("Thinking 阶段生成失败: %w", err)
 			}
 			if thinkResponse.Content != "" {
 				session.Append(*thinkResponse)
-				contextHistory = append(contextHistory, *thinkResponse)
+				compactedContext = append(compactedContext, *thinkResponse)
 			}
 		}
 
 		// action
-		actionResp, err := e.provider.Generate(ctx, contextHistory, availableTools)
+		actionResp, err := e.provider.Generate(ctx, compactedContext, availableTools)
 		if err != nil {
 			return fmt.Errorf("Action 阶段生成失败: %w", err)
 		}
 
+		// 【驾驭精髓】：注意，写入 Session（硬盘/全量内存）的永远是全量的真实响应，不受 Compact 影响！
+		// Compact 只作用于本轮发给大模型的那个临时 Context。
 		session.Append(*actionResp)
-		contextHistory = append(contextHistory, *actionResp)
+		compactedContext = append(compactedContext, *actionResp)
 
 		if actionResp.Content != "" && reporter != nil {
 			reporter.OnMessage(ctx, actionResp.Content)
