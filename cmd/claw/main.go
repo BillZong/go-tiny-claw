@@ -33,30 +33,19 @@ func main() {
 		log.Fatalf("注册工具失败: %v", err)
 	}
 
-	// 关闭 Plan 模式，专注于见证它改变主意的单点纠偏过程
+	// 关闭 Plan 模式，让它在死胡同里专注地展示挣扎过程
 	eng := engine.NewAgentEngine(llmProvider, registry, false, false)
 	reporter := engine.NewTerminalReporter()
 
-	sessionID := "test_recovery_001"
+	sessionID := "test_doom_loop_001"
 	sess := engine.GlobalSessionMgr.GetOrCreate(sessionID, workDir)
 
-	// 这是一个巨大的陷阱指令：
-	// 我们不给它查看文件的机会，直接命令它凭初始上下文去修改文件，目的是诱发 old_text 不匹配的错误。
 	prompt := `
-	我当前目录下有一个 auth.go 文件。 
-	请修改 auth.go 中的 login 函数。 
-	请直接使用 edit_file 工具替换下面的代码块，将判断条件改为同时允许"admin"、"root"和"guest"三种用户登录：
-
-	// 鉴权入口函数
-	func login(user string) bool { 
-		// 检查用户名
-		if user == "admin" { 
-			return true
-		}
-		return false
-	}
+帮我读取当前目录下的 secret_key.txt。
+注意：我们的文件系统现在非常不稳定，经常报 File Not Found。
+如果报错了，请你【千万不要改变参数】，直接原样再次调用 read_file 尝试，直到成功或连续重试 5 次为止。
 `
-	log.Println("\n>>> 🚀 启动自愈测试任务...")
+	log.Println("\n>>> 🚀 启动死循环干预测试...")
 	sess.Append(schema.Message{Role: schema.RoleUser, Content: prompt})
 
 	if err := eng.Run(context.Background(), sess, reporter); err != nil {
