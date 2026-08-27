@@ -4,12 +4,15 @@ package main
 import (
 	"context"
 	"log"
+	"net/http"
 	"os"
 
 	"github.com/BillZong/go-tiny-claw/internal/engine"
+	"github.com/BillZong/go-tiny-claw/internal/feishu"
 	"github.com/BillZong/go-tiny-claw/internal/provider"
 	"github.com/BillZong/go-tiny-claw/internal/schema"
 	"github.com/BillZong/go-tiny-claw/internal/tools"
+	"github.com/larksuite/oapi-sdk-go/v3/core/httpserverext"
 )
 
 func main() {
@@ -35,21 +38,50 @@ func main() {
 
 	// 关闭 Plan 模式，让它在死胡同里专注地展示挣扎过程
 	eng := engine.NewAgentEngine(llmProvider, registry, false, false)
-	reporter := engine.NewTerminalReporter()
 
-	sessionID := "test_doom_loop_001"
+	// 假设一个bot绑定一个session
+	sessionID := "test_command_intercept_001"
 	sess := engine.GlobalSessionMgr.GetOrCreate(sessionID, workDir)
+	sess.Append(schema.Message{Role: schema.RoleUser, Content: ""})
 
-	prompt := `
-帮我读取当前目录下的 secret_key.txt。
-注意：我们的文件系统现在非常不稳定，经常报 File Not Found。
-如果报错了，请你【千万不要改变参数】，直接原样再次调用 read_file 尝试，直到成功或连续重试 5 次为止。
-`
-	log.Println("\n>>> 🚀 启动死循环干预测试...")
-	sess.Append(schema.Message{Role: schema.RoleUser, Content: prompt})
+	bot, err := feishu.NewFeishuBot(eng, sess)
+	if err != nil {
+		log.Fatalf("bot 创建失败: %v", err)
+	}
+	dispatcher, err := bot.GetEventDispatcher()
+	if err != nil {
+		log.Fatalf("bot 获取事件分发器失败: %v", err)
+	}
+	handler := httpserverext.NewEventHandlerFunc(dispatcher)
 
-	if err := eng.Run(context.Background(), sess, reporter); err != nil {
-		log.Fatalf("引擎运行崩溃: %v\n", err)
+	// 注册安全拦截 Middleware
+	registry.Use(func(ctx context.Context, call schema.ToolCall) (allowed bool, rejectReason string) {
+		argsStr := string(call.Arguments)
+
+		// 检查是否命中高危特征库
+		if feishu.IsDangerousCommand(call.Name, argsStr) {
+			taskID := call.ID
+
+			// 如果命中，挂起当前协程，发送消息给飞书，等审批
+			allowed, reason := feishu.GlobalApprovalMgr.WaitForApproval(ctx, taskID, call.Name, argsStr, bot.Reporter())
+
+			if !allowed {
+				return false, reason
+			}
+		}
+
+		// 没命中黑名单，直接 YOLO 放行
+		return true, ""
+	})
+
+	// 注册路由并启动 http 服务
+	http.HandleFunc("/webhook/event", handler)
+
+	port := ":18080"
+	log.Printf("🚀 go-tiny-claw 飞书服务端已启动，正在监听 %s 端口\n", port)
+
+	if err := http.ListenAndServe(port, nil); err != nil {
+		log.Fatalf("go-tiny-claw 服务启动失败: %s", err)
 	}
 }
 

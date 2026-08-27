@@ -20,9 +20,11 @@ type FeishuBot struct {
 	appID     string
 	appSecret string
 	engine    *engine.AgentEngine
+	sess      *engine.Session
+	r         *FeishuReporter
 }
 
-func NewFeishuBot(engine *engine.AgentEngine) (*FeishuBot, error) {
+func NewFeishuBot(engine *engine.AgentEngine, sess *engine.Session) (*FeishuBot, error) {
 	appID := os.Getenv("FEISHU_APP_ID")
 	appSecret := os.Getenv("FEISHU_APP_SECRET")
 
@@ -37,6 +39,7 @@ func NewFeishuBot(engine *engine.AgentEngine) (*FeishuBot, error) {
 		appID:     appID,
 		appSecret: appSecret,
 		engine:    engine,
+		sess:      sess,
 	}, nil
 }
 
@@ -69,8 +72,27 @@ func (b *FeishuBot) GetEventDispatcher() (*dispatcher.EventDispatcher, error) {
 		if event.Event.Message.ChatId != nil {
 			chatId = *event.Event.Message.ChatId
 		}
-		log.Printf("[FeishuBot] 收到会话 %s 消息：%s\n", chatId, contentStr)
+		log.Printf("[Feishu] 收到会话 %s 消息: %s\n", chatId, contentStr)
 
+		// 拦截人工审批的特殊口令
+		if strings.HasPrefix(contentStr, "approve ") {
+			taskID := strings.TrimPrefix(contentStr, "approve ")
+			taskID = strings.TrimSpace(taskID)
+			// 唤醒挂起的引擎携程
+			GlobalApprovalMgr.ResolveApproval(ctx, taskID, true, "管理员已批准操作")
+			log.Printf("[Feishu] 会话 %s: ✅ 已为您批准任务 %s", chatId, taskID)
+			return nil
+		}
+		if strings.HasPrefix(contentStr, "reject ") {
+			taskID := strings.TrimPrefix(contentStr, "reject ")
+			taskID = strings.TrimSpace(taskID)
+			// 唤醒挂起的引擎携程，并反馈拒绝理由
+			GlobalApprovalMgr.ResolveApproval(ctx, taskID, false, "管理员认为该操作存在极高风险，已无情拒绝")
+			log.Printf("[Feishu] 会话 %s: 🚫 已拒绝任务 %s", chatId, taskID)
+			return nil
+		}
+
+		// 如果不是审批命令，则是正常对话，启动一个新的 Agent 任务去处理
 		go b.handleAgentRun(chatId, contentStr)
 
 		return nil
@@ -82,30 +104,39 @@ func (b *FeishuBot) GetEventDispatcher() (*dispatcher.EventDispatcher, error) {
 	return handler, nil
 }
 
+func (b *FeishuBot) Reporter() *FeishuReporter {
+	return b.r
+}
+
 func (b *FeishuBot) handleAgentRun(chatId, prompt string) {
-	ctx := context.Background()
-	reporter := NewFeishuReporter(b.client, chatId)
+	reporter := &FeishuReporter{
+		client: b.client,
+		chatId: chatId,
+	}
+	b.r = reporter
+
 	workDir, _ := os.Getwd()
 	session := engine.GlobalSessionMgr.GetOrCreate(chatId, workDir)
 	session.Append(schema.Message{Role: schema.RoleUser, Content: prompt})
+	ctx := context.Background()
 	if err := b.engine.Run(ctx, session, reporter); err != nil {
 		reporter.OnMessage(ctx, fmt.Sprintf("❌ 执行出错：%v", err))
 	}
 }
 
-type feishuReporter struct {
+type FeishuReporter struct {
 	client *lark.Client
 	chatId string
 }
 
 func NewFeishuReporter(client *lark.Client, chatId string) engine.Reporter {
-	return &feishuReporter{
+	return &FeishuReporter{
 		client: client,
 		chatId: chatId,
 	}
 }
 
-func (r *feishuReporter) sendMsg(ctx context.Context, text string) {
+func (r *FeishuReporter) sendMsg(ctx context.Context, text string) {
 	textContent := map[string]string{"text": text}
 	contentBytes, _ := json.Marshal(textContent)
 	contentStr := string(contentBytes)
@@ -122,15 +153,15 @@ func (r *feishuReporter) sendMsg(ctx context.Context, text string) {
 	_, _ = r.client.Im.Message.Create(ctx, msgReq)
 }
 
-func (r *feishuReporter) OnThinking(ctx context.Context) {
+func (r *FeishuReporter) OnThinking(ctx context.Context) {
 	r.sendMsg(ctx, "🤔 模型正在慢思考 (Thinking)...")
 }
 
-func (r *feishuReporter) OnToolCall(ctx context.Context, toolName string, args string) {
+func (r *FeishuReporter) OnToolCall(ctx context.Context, toolName string, args string) {
 	r.sendMsg(ctx, fmt.Sprintf("🛠️ **正在执行工具**：`%s`\n参数：`%s`", toolName, args))
 }
 
-func (r *feishuReporter) OnToolResult(ctx context.Context, toolName string, result string, isError bool) {
+func (r *FeishuReporter) OnToolResult(ctx context.Context, toolName string, result string, isError bool) {
 	if isError {
 		r.sendMsg(ctx, fmt.Sprintf("⚠️ **执行报错** (%s)：\n%s", toolName, result))
 	} else {
@@ -138,6 +169,6 @@ func (r *feishuReporter) OnToolResult(ctx context.Context, toolName string, resu
 	}
 }
 
-func (r *feishuReporter) OnMessage(ctx context.Context, content string) {
+func (r *FeishuReporter) OnMessage(ctx context.Context, content string) {
 	r.sendMsg(ctx, content)
 }
