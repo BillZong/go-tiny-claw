@@ -7,6 +7,7 @@ import (
 	"os"
 
 	"github.com/BillZong/go-tiny-claw/internal/engine"
+	"github.com/BillZong/go-tiny-claw/internal/observability"
 	"github.com/BillZong/go-tiny-claw/internal/provider"
 	"github.com/BillZong/go-tiny-claw/internal/schema"
 	"github.com/BillZong/go-tiny-claw/internal/tools"
@@ -21,19 +22,19 @@ func main() {
 	workDir, _ := os.Getwd()
 	workDir += "/workspace"
 
+	const modelName = "MiniMax-M3"
+
 	// 1. 初始化真实的 Provider大脑
 	// 这里你可以任意切换 openai 或 claude，效果完全一致！
-	llmProvider, err := provider.NewMiniMaxOpenAIProvider("MiniMax-M3")
+	llmProvider, err := provider.NewMiniMaxOpenAIProvider(modelName)
 	if err != nil {
 		log.Fatalf("报错了: %v", err)
 	}
 
-	reporter := engine.NewTerminalReporter()
+	const sessionID = "test_observability_001"
+	sess := engine.GlobalSessionMgr.GetOrCreate(sessionID, workDir)
 
-	readOnlyRegistry := tools.NewRegistry()
-	if err := registerReadOnlyTools(readOnlyRegistry, workDir); err != nil {
-		log.Fatalf("注册只读工具失败: %v", err)
-	}
+	trackedProvider := observability.NewCostTracker(llmProvider, modelName, sess)
 
 	mainRegistry := tools.NewRegistry()
 	if err = registerTools(mainRegistry, workDir); err != nil {
@@ -41,26 +42,24 @@ func main() {
 	}
 
 	// 启动主引擎，关闭 Plan 模式
-	eng := engine.NewAgentEngine(llmProvider, mainRegistry, false, false)
+	eng := engine.NewAgentEngine(trackedProvider, mainRegistry, false, false)
+	reporter := engine.NewTerminalReporter()
 
-	// 【核心装配】：将带有 Engine 引用和只读 Registry 的 Subagent 工具注册进主线
-	mainRegistry.Register(tools.NewSubagentTool(eng, readOnlyRegistry, reporter))
+	prompt := `请用 bash 帮我用 date 命令查一下现在的时间。`
 
-	sessionID := "test_subagent_001"
-	sess := engine.GlobalSessionMgr.GetOrCreate(sessionID, workDir)
-
-	prompt := `
-我需要你在这个遗留项目里，找到那个”核心密码“。
-为了防止污染上下文，请你务必派出子智能体 (spawn_subagent) 去执行探索任务。
-你可以让子智能体使用 bash 去查找当前目录（及其所有子目录）下名为 config.txt 的文件.
-子智能体拿到密码向你汇报后，请你亲自使用 write_file 工具，将密码写在根目录的 answer.txt 里。
-`
-	log.Println("\n>>> 🚀 启动多智能体协同测试...")
+	log.Println("\n>>> 🚀 启动带仪表盘的可观测性测试...")
 	sess.Append(schema.Message{Role: schema.RoleUser, Content: prompt})
 
 	if err := eng.Run(context.Background(), sess, reporter); err != nil {
 		log.Fatalf("引擎运行崩溃: %v", err)
 	}
+
+	log.Printf("\n================ 财务报表 ================\n")
+	log.Printf("会话 ID: %s\n", sess.ID)
+	log.Printf("总消耗 Input Tokens: %d\n", sess.TotalPromptTokens)
+	log.Printf("总消耗 Output Tokens: %d\n", sess.TotalCompletionTokens)
+	log.Printf("总计费用 (CNY): ¥%.6f\n", sess.TotalCostCNY)
+	log.Printf("==========================================\n")
 }
 
 func registerReadOnlyTools(registry tools.Registry, workDir string) error {
