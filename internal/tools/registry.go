@@ -92,7 +92,7 @@ func (r *registryImpl) Execute(ctx context.Context, call schema.ToolCall) schema
 	// 3. 执行工具逻辑：将原始的 JSON 字节流直接丢给具体工具
 	output, err := tool.Execute(ctx, call.Arguments)
 	if err != nil {
-		result.Output = fmt.Sprintf("Error executing %s: %v", call.Name)
+		result.Output = fmt.Sprintf("Error executing %s: %v", call.Name, err.Error())
 		return result
 	}
 

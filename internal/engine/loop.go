@@ -219,44 +219,28 @@ func (e *AgentEngine) RunSub(ctx context.Context, taskPrompt string, readOnlyReg
 			go func(i int, toolCall schema.ToolCall) {
 				defer wg.Done()
 
-				// 可视化的关键：让终端用户看到 Subagent 正在干嘛
-				var (
-					r  Reporter
-					ok bool
-				)
+				result := readOnlyRegistry.Execute(ctx, toolCall)
+
+				finalOutput := result.Output
+				if result.IsError {
+					finalOutput = e.recovery.AnalyzeAndInject(toolCall.Name, result.Output)
+				}
+
+				// 可视化：仅当 reporter 接口兼容时才转发事件；nil 或类型不匹配都不 panic
 				if reporter != nil {
-					r, ok = reporter.(Reporter)
-					if !ok {
-						finalOutput := fmt.Sprintf("[Subagent] 碰到不可恢复的错误: downcast 类型失败: %s", call.Name)
-						r.OnToolResult(ctx, fmt.Sprintf("[Subagent] %s", call.Name), finalOutput, true)
-
-						observationMsgs[i] = schema.Message{
-							Role:       schema.RoleUser,
-							Content:    finalOutput,
-							ToolCallID: call.ID,
-						}
-					}
-
-					result := readOnlyRegistry.Execute(ctx, call)
-
-					finalOutput := result.Output
-					if result.IsError {
-						finalOutput = e.recovery.AnalyzeAndInject(call.Name, result.Output)
-					}
-
-					if reporter != nil {
+					if r, ok := reporter.(Reporter); ok {
 						display := finalOutput
 						if len(display) > 200 {
 							display = display[:200] + "...（已截断）"
 						}
-						r.OnToolResult(ctx, fmt.Sprintf("[Subagent] %s", call.Name), display, result.IsError)
+						r.OnToolResult(ctx, fmt.Sprintf("[Subagent] %s", toolCall.Name), display, result.IsError)
 					}
+				}
 
-					observationMsgs[i] = schema.Message{
-						Role:       schema.RoleUser,
-						Content:    finalOutput,
-						ToolCallID: call.ID,
-					}
+				observationMsgs[i] = schema.Message{
+					Role:       schema.RoleUser,
+					Content:    finalOutput,
+					ToolCallID: toolCall.ID,
 				}
 			}(i, call)
 		}
