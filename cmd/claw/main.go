@@ -4,15 +4,12 @@ package main
 import (
 	"context"
 	"log"
-	"net/http"
 	"os"
 
 	"github.com/BillZong/go-tiny-claw/internal/engine"
-	"github.com/BillZong/go-tiny-claw/internal/feishu"
 	"github.com/BillZong/go-tiny-claw/internal/provider"
 	"github.com/BillZong/go-tiny-claw/internal/schema"
 	"github.com/BillZong/go-tiny-claw/internal/tools"
-	"github.com/larksuite/oapi-sdk-go/v3/core/httpserverext"
 )
 
 func main() {
@@ -31,58 +28,59 @@ func main() {
 		log.Fatalf("报错了: %v", err)
 	}
 
-	registry := tools.NewRegistry()
-	if err = registerTools(registry, workDir); err != nil {
-		log.Fatalf("注册工具失败: %v", err)
+	reporter := engine.NewTerminalReporter()
+
+	readOnlyRegistry := tools.NewRegistry()
+	if err := registerReadOnlyTools(readOnlyRegistry, workDir); err != nil {
+		log.Fatalf("注册只读工具失败: %v", err)
 	}
 
-	// 关闭 Plan 模式，让它在死胡同里专注地展示挣扎过程
-	eng := engine.NewAgentEngine(llmProvider, registry, false, false)
+	mainRegistry := tools.NewRegistry()
+	if err = registerTools(mainRegistry, workDir); err != nil {
+		log.Fatalf("注册主工具失败: %v", err)
+	}
 
-	// 假设一个bot绑定一个session
-	sessionID := "test_command_intercept_001"
+	// 启动主引擎，关闭 Plan 模式
+	eng := engine.NewAgentEngine(llmProvider, mainRegistry, false, false)
+
+	// 【核心装配】：将带有 Engine 引用和只读 Registry 的 Subagent 工具注册进主线
+	mainRegistry.Register(tools.NewSubagentTool(eng, readOnlyRegistry, reporter))
+
+	sessionID := "test_subagent_001"
 	sess := engine.GlobalSessionMgr.GetOrCreate(sessionID, workDir)
-	sess.Append(schema.Message{Role: schema.RoleUser, Content: ""})
 
-	bot, err := feishu.NewFeishuBot(eng, sess)
+	prompt := `
+我需要你在这个遗留项目里，找到那个”核心密码“。
+为了防止污染上下文，请你务必派出子智能体 (spawn_subagent) 去执行探索任务。
+你可以让子智能体使用 bash 去查找当前目录（及其所有子目录）下名为 config.txt 的文件.
+子智能体拿到密码向你汇报后，请你亲自使用 write_file 工具，将密码写在根目录的 answer.txt 里。
+`
+	log.Println("\n>>> 🚀 启动多智能体协同测试...")
+	sess.Append(schema.Message{Role: schema.RoleUser, Content: prompt})
+
+	if err := eng.Run(context.Background(), sess, reporter); err != nil {
+		log.Fatalf("引擎运行崩溃: %v", err)
+	}
+}
+
+func registerReadOnlyTools(registry tools.Registry, workDir string) error {
+	rt, err := tools.NewReadFileTool(workDir)
 	if err != nil {
-		log.Fatalf("bot 创建失败: %v", err)
+		return err
 	}
-	dispatcher, err := bot.GetEventDispatcher()
+	if err := registry.Register(rt); err != nil {
+		return err
+	}
+
+	bt, err := tools.NewBashTool(workDir)
 	if err != nil {
-		log.Fatalf("bot 获取事件分发器失败: %v", err)
+		return err
 	}
-	handler := httpserverext.NewEventHandlerFunc(dispatcher)
-
-	// 注册安全拦截 Middleware
-	registry.Use(func(ctx context.Context, call schema.ToolCall) (allowed bool, rejectReason string) {
-		argsStr := string(call.Arguments)
-
-		// 检查是否命中高危特征库
-		if feishu.IsDangerousCommand(call.Name, argsStr) {
-			taskID := call.ID
-
-			// 如果命中，挂起当前协程，发送消息给飞书，等审批
-			allowed, reason := feishu.GlobalApprovalMgr.WaitForApproval(ctx, taskID, call.Name, argsStr, bot.Reporter())
-
-			if !allowed {
-				return false, reason
-			}
-		}
-
-		// 没命中黑名单，直接 YOLO 放行
-		return true, ""
-	})
-
-	// 注册路由并启动 http 服务
-	http.HandleFunc("/webhook/event", handler)
-
-	port := ":18080"
-	log.Printf("🚀 go-tiny-claw 飞书服务端已启动，正在监听 %s 端口\n", port)
-
-	if err := http.ListenAndServe(port, nil); err != nil {
-		log.Fatalf("go-tiny-claw 服务启动失败: %s", err)
+	if err := registry.Register(bt); err != nil {
+		return err
 	}
+
+	return nil
 }
 
 func registerTools(registry tools.Registry, workDir string) error {
