@@ -99,7 +99,7 @@ func registerTools(registry tools.Registry, workDir string) error {
 		return err
 	}
 
-	et, err := tools.NewEditFileToll(workDir)
+	et, err := tools.NewEditFileTool(workDir)
 	if err != nil {
 		return err
 	}

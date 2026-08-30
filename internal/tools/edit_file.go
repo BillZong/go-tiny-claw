@@ -15,7 +15,7 @@ type editFileTool struct {
 	workDir string
 }
 
-func NewEditFileToll(workDir string) (BaseTool, error) {
+func NewEditFileTool(workDir string) (BaseTool, error) {
 	if workDir == "" {
 		return nil, fmt.Errorf("必须提供工作路径")
 	}
