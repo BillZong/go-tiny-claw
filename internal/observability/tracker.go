@@ -5,10 +5,17 @@ import (
 	"log"
 	"time"
 
-	"github.com/BillZong/go-tiny-claw/internal/engine"
 	"github.com/BillZong/go-tiny-claw/internal/provider"
 	"github.com/BillZong/go-tiny-claw/internal/schema"
 )
+
+// UsageRecorder 是 observability 包对 Session 的最小依赖抽象。
+// 通过仅依赖该接口，避免 observability 与 engine 形成 import cycle
+// （engine/loop.go 需要导入本包的 trace 能力）。
+// *engine.Session 隐式实现此接口。
+type UsageRecorder interface {
+	RecordUsage(prompt int, completion int, cost float64)
+}
 
 // PricingModel 定义了不同大模型的计费标准 (单位: 人民币/1M Tokens)// 为了演示，这里硬编码了当前市面上几个主流模型的官方大致定价。
 var PriceModel = map[string]struct {
@@ -44,11 +51,11 @@ var PriceModel = map[string]struct {
 type CostTracker struct {
 	nextProvider provider.LLMProvider
 	modelName    string
-	session      *engine.Session // 当前所属的会话
+	session      UsageRecorder // 当前所属的会话（通过接口解耦，避免 import cycle）
 }
 
 // Generate 实现了 LLMProvider 接口！这意味着它可以被无缝注入到 Main Loop 中。
-func NewCostTracker(next provider.LLMProvider, modelName string, session *engine.Session) provider.LLMProvider {
+func NewCostTracker(next provider.LLMProvider, modelName string, session UsageRecorder) provider.LLMProvider {
 	return &CostTracker{
 		nextProvider: next,
 		modelName:    modelName,
@@ -88,7 +95,6 @@ func (t *CostTracker) Generate(ctx context.Context, messages []schema.Message, a
 		// 将账单累加到当前的 session 中，供人类后续s随时查询
 		if t.session != nil {
 			t.session.RecordUsage(promptTokens, completionTokens, cost)
-			log.Printf("[Tracker] 💰 当前会话 (%s) 累计花费: ¥%.6f\n", t.session.ID, t.session.TotalCostCNY)
 		}
 	} else {
 		log.Printf("[Tracker] ⚠️ API 调用完成，但未返回 Usage 数据 | 耗时: %v\n", latency)

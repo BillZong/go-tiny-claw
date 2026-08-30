@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 
+	"github.com/BillZong/go-tiny-claw/internal/observability"
 	"github.com/BillZong/go-tiny-claw/internal/schema"
 )
 
@@ -68,6 +69,12 @@ func (r *registryImpl) GetAvailableTools() []schema.ToolDefinition {
 }
 
 func (r *registryImpl) Execute(ctx context.Context, call schema.ToolCall) schema.ToolResult {
+	// 【埋点】开启工具执行的 Span，无论成功失败都通过 defer 保证 EndSpan 被调用
+	ctx, span := observability.StartSpan(ctx, "Tool.Execute")
+	span.AddAttribute("tool_name", call.Name)
+	span.AddAttribute("arguments", string(call.Arguments))
+	defer span.EndSpan()
+
 	result := schema.ToolResult{
 		ToolCallID: call.ID,
 		IsError:    true, // 默认有错误
@@ -75,6 +82,7 @@ func (r *registryImpl) Execute(ctx context.Context, call schema.ToolCall) schema
 	// 1. 路由查找：如果在注册表中找不到该工具，这是模型产生了缓解，直接向模型抛出错误
 	tool, exists := r.tools[call.Name]
 	if !exists {
+		span.AddAttribute("error", "tool_not_found")
 		result.Output = fmt.Sprintf("Error: 系统重不存在名为 '%s' 的工具。", call.Name)
 		return result
 	}
@@ -83,6 +91,8 @@ func (r *registryImpl) Execute(ctx context.Context, call schema.ToolCall) schema
 	for _, mw := range r.middlewares {
 		allowed, reason := mw(ctx, call)
 		if !allowed {
+			span.AddAttribute("intercepted", true)
+			span.AddAttribute("reject_reason", reason)
 			log.Printf("[Registry] ⚠️ 工具 %s 被 Middleware 拦截: %s\n", call.Name, reason)
 			result.Output = fmt.Sprintf("执行被系统拦截。原因: %s", reason)
 			return result
@@ -92,6 +102,7 @@ func (r *registryImpl) Execute(ctx context.Context, call schema.ToolCall) schema
 	// 3. 执行工具逻辑：将原始的 JSON 字节流直接丢给具体工具
 	output, err := tool.Execute(ctx, call.Arguments)
 	if err != nil {
+		span.AddAttribute("error", err.Error())
 		result.Output = fmt.Sprintf("Error executing %s: %v", call.Name, err.Error())
 		return result
 	}
@@ -100,5 +111,15 @@ func (r *registryImpl) Execute(ctx context.Context, call schema.ToolCall) schema
 	result.Output = output
 	result.IsError = false
 
+	// 仅截取前 100 字符放入 Trace，防止 Trace 文件过度膨胀
+	span.AddAttribute("output_preview", truncate(output, 100))
 	return result
+}
+
+// truncate 截取字符串前 max 个字符，超出部分用 "..." 标识。常用于 Span 属性避免 Trace 过大。
+func truncate(s string, max int) string {
+	if len(s) > max {
+		return s[:max] + "..."
+	}
+	return s
 }
