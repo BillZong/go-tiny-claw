@@ -37,6 +37,11 @@ type MiddlewareFunc func(ctx context.Context, call schema.ToolCall) (allowed boo
 type registryImpl struct {
 	tools       map[string]BaseTool
 	middlewares []MiddlewareFunc
+
+	// cachedDefs 缓存 GetAvailableTools 的结果。注册新工具时清空 (lazy recompute on next read)。
+	// 在 Agent 的 Main Loop 中每 Turn 都会调一次 GetAvailableTools，而在典型生命周期里工具集
+	// 一开始就 Register 完毕后再不变更，所以缓存命中率接近 100%，可以省掉每 Turn 的 slice + map alloc。
+	cachedDefs []schema.ToolDefinition
 }
 
 func NewRegistry() Registry {
@@ -56,15 +61,22 @@ func (r *registryImpl) Register(tool BaseTool) error {
 		log.Printf("[Warning] 工具 '%s' 已经被注册，将被覆盖。\n", name)
 	}
 	r.tools[name] = tool
+	r.cachedDefs = nil // 工具集变动，失效缓存
 	log.Printf("[Registry] 成功挂载工具: %s\n", name)
 	return nil
 }
 
 func (r *registryImpl) GetAvailableTools() []schema.ToolDefinition {
-	var defs = make([]schema.ToolDefinition, 0, len(r.tools))
+	if r.cachedDefs != nil {
+		return r.cachedDefs
+	}
+	// map 遍历顺序随机，但工具集是稳定的（启动后不再变），所以这里产生的顺序抖动无影响。
+	// 若以后需要稳定顺序，可以先按 name 排序 keys 再生成。
+	defs := make([]schema.ToolDefinition, 0, len(r.tools))
 	for _, tool := range r.tools {
 		defs = append(defs, tool.Definition())
 	}
+	r.cachedDefs = defs
 	return defs
 }
 

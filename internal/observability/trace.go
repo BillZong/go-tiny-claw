@@ -36,9 +36,12 @@ type Span struct {
 // 在 for 循环中直接 defer 会导致 EndSpan 被推迟到外层函数返回时执行，务必将循环体拆为独立函数。
 func StartSpan(ctx context.Context, name string) (context.Context, *Span) {
 	span := &Span{
-		Name:       name,
-		StartTime:  time.Now(),
-		Attributes: make(map[string]interface{}),
+		Name:      name,
+		StartTime: time.Now(),
+		// Attributes 走懒分配：常见场景下 Span 不带任何属性 (例如 LLM.Action 这种纯时间跨度)，
+		// 让 nil map 顶上，避免每次 StartSpan 都白白 alloc 一个空 map。
+		// 写入路径在 AddAttribute 里 lazy alloc，对外行为不变。
+		// Attributes 字段的 json tag 是 omitempty，nil map 序列化时直接被省略，与旧版 `{}` 输出一致。
 	}
 
 	// 从 context 中尝试获取父 Span，若存在则把当前 Span 挂到父节点的 Children 上。
@@ -64,11 +67,23 @@ func (s *Span) EndSpan() {
 	}
 }
 
+// GetCurrentSpan 从 Context 中取出当前 Span（若存在），便于在其他包内补打属性。
+// 没有当前 Span 时返回 nil，调用方需自行处理。
+func GetCurrentSpan(ctx context.Context) *Span {
+	if span, ok := ctx.Value(traceKey{}).(*Span); ok {
+		return span
+	}
+	return nil
+}
+
 // AddAttribute 为当前 Span 记录关键元数据（例如 Token 消耗、工具名）。
-// 并发安全。
+// 并发安全；首次写入时懒分配底层 map。
 func (s *Span) AddAttribute(key string, value interface{}) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.Attributes == nil {
+		s.Attributes = make(map[string]interface{})
+	}
 	s.Attributes[key] = value
 }
 
