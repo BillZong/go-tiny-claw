@@ -3,55 +3,102 @@ package main
 
 import (
 	"context"
+	"flag"
+	"fmt"
 	"log"
 	"os"
+	"path/filepath"
+	"time"
 
 	"github.com/BillZong/go-tiny-claw/internal/engine"
+	"github.com/BillZong/go-tiny-claw/internal/observability"
 	"github.com/BillZong/go-tiny-claw/internal/provider"
 	"github.com/BillZong/go-tiny-claw/internal/schema"
 	"github.com/BillZong/go-tiny-claw/internal/tools"
 )
 
 func main() {
+	// 1. 命令行解析
+	promptPtr := flag.String("prompt", "", "要交给 Agent 执行的任务描述")
+	workDirPtr := flag.String("dir", ".", "Agent 运行的工作区目录路径 (默认为当前目录)")
+	sessionPtr := flag.String("session", "cli_default_session", "指定会话 ID，支持断点续传")
+	flag.Parse()
+
 	// 确保已设置 MINIMAX_API_KEY
 	if os.Getenv("MINIMAX_API_KEY") == "" {
 		log.Fatal("请先导出 MINIMAX_API_KEY 环境变量")
 	}
 
-	workDir, _ := os.Getwd()
-	workDir += "/workspace"
+	if *promptPtr == "" {
+		log.Fatalf("用法: go-tiny-claw -prompt \"你的任务描述\" [-dir /path/to/workdir] [-session session_id]")
+	}
 
+	// 解析工作区绝对路径
+	workDir, err := filepath.Abs(*workDirPtr)
+	if err != nil {
+		log.Fatalf("解析工作区路径失败: %v", err)
+	}
+
+	fmt.Println("==================================================")
+	fmt.Printf("🚀 启动 go-tiny-claw CLI 引擎...\n")
+	fmt.Printf("📁 锁定工作区: %s\n", workDir)
+	fmt.Println("==================================================")
+
+	// 2. 初始化核心基础服务
+	var realProvider provider.LLMProvider
 	const modelName = "MiniMax-M3"
-
-	// 1. 初始化真实的 Provider大脑
-	// 这里你可以任意切换 openai 或 claude，效果完全一致！
-	llmProvider, err := provider.NewMiniMaxOpenAIProvider(modelName)
+	realProvider, err = provider.NewMiniMaxOpenAIProvider(modelName)
 	if err != nil {
 		log.Fatalf("报错了: %v", err)
 	}
 
-	mainRegistry := tools.NewRegistry()
-	if err = registerTools(mainRegistry, workDir); err != nil {
+	// 获取持久化 session
+	sess := engine.GlobalSessionMgr.GetOrCreate(*sessionPtr, workDir)
+
+	// cost tracker 包装器
+	trackedProvider := observability.NewCostTracker(realProvider, modelName, sess)
+
+	// 3. 初始化工具与执行层
+	registry := tools.NewRegistry()
+	if err = registerTools(registry, workDir); err != nil {
 		log.Fatalf("注册主工具失败: %v", err)
 	}
 
-	// 启动主引擎，关闭 Plan 模式
-	eng := engine.NewAgentEngine(llmProvider, mainRegistry, false, false)
+	// 在 cli 模式下，我们默认开启 YOLO 模式（全权信任本地执行），因此这里暂时不挂载 Feishu 审批 Middleware。
+
+	// 4. 初始化核心引擎（组装器内部会自动加载 Composer, Compactor, Recovery, Reminder）
+	// 开启plan模式，暂不开启思考模式
+	eng := engine.NewAgentEngine(trackedProvider, registry, false, true)
+
+	// 启动链路追踪
+	ctx, rootSpan := observability.StartSpan(context.Background(), "CLI.TaskRun")
+	rootSpan.AddAttribute("Prompt", *promptPtr)
+	defer func() {
+		rootSpan.EndSpan()
+		_ = observability.ExportTraceToFile(rootSpan, workDir, sess.ID)
+	}()
+
+	// 5. 初始化彩色终端输出器
 	reporter := engine.NewTerminalReporter()
-	sess := engine.GlobalSessionMgr.GetOrCreate("test_trace_001", workDir)
 
-	// 触发一个跨工具类型的并发任务，便于在 Trace JSON 中观察到 Tool.Execute 节点平行挂在 Turn 节点下
-	prompt := `为了加快执行速度，请你在一轮回复中，【同时并行】完成以下两件事：
-1. 使用 bash 工具执行 'sleep 2 && echo "系统环境检查完毕"'
-2. 使用 write_file 工具，在当前目录下创建一个 'trace_test.md'，内容写上 "测试并发的写入"。
-请确保你是分别调用两个不同的工具，不要试图把它们合并成一个命令！`
+	fmt.Printf("\n🎯 收到任务: %s\n\n", *promptPtr)
 
-	log.Println("\n>>> 🚀 启动带 Tracing 链路追踪的测试...")
-	sess.Append(schema.Message{Role: schema.RoleUser, Content: prompt})
+	// 将用户的 Prompt 压入 Session 记忆
+	sess.Append(schema.Message{
+		Role:    schema.RoleUser,
+		Content: *promptPtr,
+	})
 
-	if err := eng.Run(context.Background(), sess, reporter); err != nil {
-		log.Fatalf("引擎运行崩溃: %v", err)
+	// 启动 Main Loop
+	err = eng.Run(ctx, sess, reporter)
+	if err != nil {
+		log.Fatalf("\n💥 引擎运行崩溃: %v", err)
 	}
+
+	fmt.Println("\n==================================================")
+	fmt.Printf("✨ 任务圆满结束。总耗时: %v\n", time.Since(rootSpan.StartTime))
+	fmt.Printf("💰 Session 累计消耗: ￥%.6f | Token: Input %d, Output %d\n", sess.TotalCostCNY, sess.TotalPromptTokens, sess.TotalCompletionTokens)
+	fmt.Println("==================================================")
 }
 
 func registerReadOnlyTools(registry tools.Registry, workDir string) error {
