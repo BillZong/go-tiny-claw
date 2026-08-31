@@ -64,6 +64,10 @@ func TestStartSpan_AllocsPerRun(t *testing.T) {
 // TestSpan_EndSpanIdempotent 验证多次 EndSpan 是幂等的，不会覆盖 EndTime。
 func TestSpan_EndSpanIdempotent(t *testing.T) {
 	_, span := StartSpan(context.Background(), "idem")
+
+	// 模拟执行 1ms，确保 EndSpan 时 duration 不为 0ms
+	time.Sleep(1 * time.Millisecond)
+
 	span.EndSpan()
 	first := span.EndTime
 	if first.IsZero() {
@@ -77,9 +81,9 @@ func TestSpan_EndSpanIdempotent(t *testing.T) {
 		t.Fatalf("EndSpan should be idempotent: first=%v second=%v", first, span.EndTime)
 	}
 
-	// DurationMs 也应保持第一次的值（注意：操作极快时 DurationMs 可能为 0ms，这里只断言非负）
-	if span.DurationMs < 0 {
-		t.Fatalf("DurationMs should be >= 0, got %d", span.DurationMs)
+	// DurationMs 也应保持第一次的值
+	if span.DurationMs <= 0 {
+		t.Fatalf("DurationMs should be > 0, got %d", span.DurationMs)
 	}
 }
 

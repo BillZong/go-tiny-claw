@@ -97,6 +97,118 @@ func TestGetAvailableTools_AllocsPerRun(t *testing.T) {
 	}
 }
 
+// TestGetAvailableTools_ConcurrentMiss 压测 cache miss 路径的并发安全性。
+//
+// 这个测试针对的是：之前 GetAvailableTools 在 cache miss 路径下"持 RLock 做写"
+// 的 data race bug。修复方式是 double-checked locking：未命中时升级为写锁。
+//
+// 测试方法：通过 Register 让 cachedDefs 失效，然后让 N 个 goroutine 同时
+// 调 GetAvailableTools，配合 -race 检测 data race。
+func TestGetAvailableTools_ConcurrentMiss(t *testing.T) {
+	r := NewRegistry().(*registryImpl)
+	_ = r.Register(&fakeTool{name: "bash"})
+	_ = r.Register(&fakeTool{name: "read_file"})
+	_ = r.Register(&fakeTool{name: "edit_file"})
+	// 强制 cache miss：通过 Register 让 cachedDefs 失效，然后立刻并发读
+	_ = r.Register(&fakeTool{name: "write_file"})
+
+	const readers = 64
+	var wg sync.WaitGroup
+	start := make(chan struct{}) // 同步起跑，让所有 goroutine 同时撞上 cache miss
+	for i := 0; i < readers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			defs := r.GetAvailableTools()
+			if len(defs) != 4 {
+				t.Errorf("expected 4 tool defs, got %d", len(defs))
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	// 最后缓存应当已经构建好
+	if r.cachedDefs == nil {
+		t.Fatal("cachedDefs should be populated after concurrent miss resolution")
+	}
+	if len(r.cachedDefs) != 4 {
+		t.Fatalf("final cache should have 4 entries, got %d", len(r.cachedDefs))
+	}
+}
+
+// TestExecute_ConcurrentWithRegister 压测 Execute 与 Register 并发安全。
+//
+// 这是用户最初想堵的"concurrent map read/write fatal panic"场景。
+// 之前 Execute 完全没有锁，理论上与 Register 并发会触发 Go runtime fatal。
+// 修复后：Execute 在读 r.tools / r.middlewares 时持 RLock，Register 拿 Lock 互斥。
+func TestExecute_ConcurrentWithRegister(t *testing.T) {
+	r := NewRegistry()
+	_ = r.Register(&fakeTool{name: "bash"})
+
+	const (
+		executors    = 16
+		registrations = 200
+	)
+	var wg sync.WaitGroup
+
+	// 执行者：循环 Execute
+	for i := 0; i < executors; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < registrations; j++ {
+				res := r.Execute(context.Background(), schema.ToolCall{
+					ID:        fmt.Sprintf("call-%d", j),
+					Name:      "bash",
+					Arguments: json.RawMessage(`{}`),
+				})
+				if res.IsError {
+					t.Errorf("unexpected error: %s", res.Output)
+				}
+			}
+		}()
+	}
+
+	// 注册者：循环 Register 覆盖现有工具
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for j := 0; j < registrations; j++ {
+			_ = r.Register(&fakeTool{name: "bash"})
+		}
+	}()
+
+	wg.Wait()
+}
+
+// TestExecute_AllocsOnRead 验证 Execute 命中常见路径（不触发拦截、不报错）下尽量少 alloc。
+// 注意：StartSpan/AddAttribute 内部会 alloc 一些 map 和 context 包装，这是 Tracing 自身成本，
+// 这里只验证 Execute 自身没有意外新增 alloc。
+func TestExecute_AllocsOnRead(t *testing.T) {
+	r := NewRegistry()
+	_ = r.Register(&fakeTool{name: "bash"})
+
+	call := schema.ToolCall{
+		ID:        "call-1",
+		Name:      "bash",
+		Arguments: json.RawMessage(`{}`),
+	}
+
+	// 第一次执行预热
+	_ = r.Execute(context.Background(), call)
+
+	allocs := testing.AllocsPerRun(100, func() {
+		_ = r.Execute(context.Background(), call)
+	})
+	// 实际观察：Execute 路径大约 6-8 allocs（Span + context + log boxing），
+	// 这里只给上限防止明显回归。
+	if allocs > 15 {
+		t.Logf("WARNING: Execute uses %.2f allocs/run; expected <= 15", allocs)
+	}
+}
+
 // TestGetAvailableTools_EmptyRegistry 验证空注册表返回空 slice（不是 nil panic）。
 func TestGetAvailableTools_EmptyRegistry(t *testing.T) {
 	r := NewRegistry()

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"sync"
 
 	"github.com/BillZong/go-tiny-claw/internal/observability"
 	"github.com/BillZong/go-tiny-claw/internal/schema"
@@ -42,6 +43,7 @@ type registryImpl struct {
 	// 在 Agent 的 Main Loop 中每 Turn 都会调一次 GetAvailableTools，而在典型生命周期里工具集
 	// 一开始就 Register 完毕后再不变更，所以缓存命中率接近 100%，可以省掉每 Turn 的 slice + map alloc。
 	cachedDefs []schema.ToolDefinition
+	mu         sync.RWMutex
 }
 
 func NewRegistry() Registry {
@@ -52,10 +54,15 @@ func NewRegistry() Registry {
 }
 
 func (r *registryImpl) Use(mw MiddlewareFunc) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.middlewares = append(r.middlewares, mw)
 }
 
 func (r *registryImpl) Register(tool BaseTool) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
 	name := tool.Name()
 	if _, exist := r.tools[name]; exist {
 		log.Printf("[Warning] 工具 '%s' 已经被注册，将被覆盖。\n", name)
@@ -67,6 +74,19 @@ func (r *registryImpl) Register(tool BaseTool) error {
 }
 
 func (r *registryImpl) GetAvailableTools() []schema.ToolDefinition {
+	// 缓存命中路径：纯读，RLock 即可，O(1) 返回。
+	r.mu.RLock()
+	if r.cachedDefs != nil {
+		defs := r.cachedDefs
+		r.mu.RUnlock()
+		return defs
+	}
+	r.mu.RUnlock()
+
+	// 缓存未命中：升级为写锁重建。
+	// double-check：避免两个 goroutine 同时进入写锁区后重复构建（前者写好后后者应当直接复用）。
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if r.cachedDefs != nil {
 		return r.cachedDefs
 	}
@@ -87,12 +107,20 @@ func (r *registryImpl) Execute(ctx context.Context, call schema.ToolCall) schema
 	span.AddAttribute("arguments", string(call.Arguments))
 	defer span.EndSpan()
 
+	// 在持锁期间只读 maps / slices + 拷贝出局部引用，
+	// 调底层 tool.Execute / mw 之前必须释放锁 —— 否则：
+	//   1. 用户工具可能耗时很长，阻塞 Register
+	//   2. 中间件可能再次回调本 Registry，形成潜在重入风险
+	r.mu.RLock()
+	tool, exists := r.tools[call.Name]
+	middlewares := r.middlewares
+	r.mu.RUnlock()
+
 	result := schema.ToolResult{
 		ToolCallID: call.ID,
 		IsError:    true, // 默认有错误
 	}
 	// 1. 路由查找：如果在注册表中找不到该工具，这是模型产生了缓解，直接向模型抛出错误
-	tool, exists := r.tools[call.Name]
 	if !exists {
 		span.AddAttribute("error", "tool_not_found")
 		result.Output = fmt.Sprintf("Error: 系统重不存在名为 '%s' 的工具。", call.Name)
@@ -100,7 +128,7 @@ func (r *registryImpl) Execute(ctx context.Context, call schema.ToolCall) schema
 	}
 
 	// 2. 【核心防御】在执行底层逻辑前，依次运行所有的 middleware
-	for _, mw := range r.middlewares {
+	for _, mw := range middlewares {
 		allowed, reason := mw(ctx, call)
 		if !allowed {
 			span.AddAttribute("intercepted", true)
